@@ -9,7 +9,7 @@ from utils.utils import cvtColor, preprocess_input
 
 
 class YoloDataset(Dataset):
-    def __init__(self, annotation_lines, input_shape, num_classes, epoch_length, mosaic, train, mosaic_ratio = 0.7):
+    def __init__(self, annotation_lines, input_shape, num_classes, epoch_length, mosaic, train, mosaic_ep_ratio = 0.7, mosaic_ratio = 0.5):
         super(YoloDataset, self).__init__()
         self.annotation_lines   = annotation_lines
         self.input_shape        = input_shape
@@ -18,9 +18,12 @@ class YoloDataset(Dataset):
         self.mosaic             = mosaic
         self.train              = train
         self.mosaic_ratio       = mosaic_ratio
+        self.mosaic_ep_ratio    = mosaic_ep_ratio
 
         self.epoch_now          = -1
         self.length             = len(self.annotation_lines)
+        
+        self.mix_ratio          = 0.5
 
     def __len__(self):
         return self.length
@@ -33,7 +36,7 @@ class YoloDataset(Dataset):
         #   验证时不进行数据的随机增强
         #---------------------------------------------------#
         if self.mosaic:
-            if self.rand() < 0.5 and self.epoch_now < self.epoch_length * self.mosaic_ratio:
+            if self.rand() < self.mosaic_ratio and self.epoch_now < self.epoch_length * self.mosaic_ep_ratio:
                 lines = sample(self.annotation_lines, 3)
                 lines.append(self.annotation_lines[index])
                 shuffle(lines)
@@ -51,6 +54,93 @@ class YoloDataset(Dataset):
 
     def rand(self, a=0, b=1):
         return np.random.rand()*(b-a) + a
+    
+    def letter_box(self, img, box, input_shape):
+        w, h = input_shape
+        iw, ih  = img.size
+
+        scale = min(w/iw, h/ih)
+        nw = int(iw*scale)
+        nh = int(ih*scale)
+        dx = int((w-nw)/2)
+        dy = int((h-nh)/2)
+
+        #---------------------------------#
+        #   将图像多余的部分加上灰条
+        #---------------------------------#
+        img       = img.resize((nw,nh), Image.BICUBIC)
+        new_img   = Image.new('RGB', (w,h), (128,128,128))
+        new_img.paste(img, (dx, dy))
+
+        #---------------------------------#
+        #   对真实框进行调整
+        #---------------------------------#
+        if len(box)>0:
+            np.random.shuffle(box)
+            box[:, [0,2]] = box[:, [0,2]]*nw/iw + dx
+            box[:, [1,3]] = box[:, [1,3]]*nh/ih + dy
+            box[:, 0:2][box[:, 0:2]<0] = 0
+            box[:, 2][box[:, 2]>w] = w
+            box[:, 3][box[:, 3]>h] = h
+            box_w = box[:, 2] - box[:, 0]
+            box_h = box[:, 3] - box[:, 1]
+            box = box[np.logical_and(box_w>1, box_h>1)] # discard invalid box
+        return new_img, box
+    
+    def mix_up(self, img_orginal, label):
+        #读取用于混合的图片
+        mix_img_infor = sample(self.annotation_lines, 1)[0]
+        mix_img = Image.open(mix_img_infor.split()[0])
+
+        mix_img_w, mix_img_h = mix_img.size
+        img_orginal_h, img_orginal_w = self.input_shape
+        #用于混合的图片的标注信息
+        line = mix_img_infor.split()
+        mix_img_box = np.array([np.array(list(map(int,box.split(',')))) for box in line[1:]])
+
+        random_resize_scale = self.rand(0.75, 1.5)
+        flip = self.rand()<0.5
+
+        if mix_img_w != img_orginal_w or mix_img_h != img_orginal_h:
+            mix_img, mix_img_box = self.letter_box(mix_img, mix_img_box, self.input_shape)
+
+        mix_img_w = int(mix_img_w*random_resize_scale)
+        mix_img_h = int(mix_img_h*random_resize_scale)
+        
+
+        mix_img = mix_img.resize((mix_img_w, mix_img_h), Image.BICUBIC)
+        mix_img_box[:, 0:4] = mix_img_box[:, 0:4]*random_resize_scale
+
+        if flip:
+            mix_img = mix_img.transpose(Image.FLIP_TOP_BOTTOM)
+            mix_img_box[:, [1,3]] = mix_img.size[1] - mix_img_box[:, [3,1]]
+
+        padded_img = np.zeros(
+            (max(mix_img_h, img_orginal_h), max(mix_img_w, img_orginal_w), 3), dtype=np.uint8
+        )
+        mix_img = np.array(mix_img, np.uint8)
+        padded_img[:mix_img_h, :mix_img_w] = mix_img
+
+        y_offset = 0
+        x_offset = 0
+
+        if padded_img.shape[0] > img_orginal_h:
+            y_offset = random.randint(0, padded_img.shape[0] - img_orginal_h - 1)
+        if padded_img.shape[1] > img_orginal_w:
+            x_offset = random.randint(0, padded_img.shape[1] - img_orginal_w - 1)
+
+        padded_cropped_img = padded_img[
+            y_offset: y_offset + img_orginal_h, x_offset: x_offset + img_orginal_w
+        ]
+        mix_img_box[:, [1,3]] = mix_img_box[:, [1,3]] - y_offset
+        mix_img_box[:, [0,2]] = mix_img_box[:, [0,2]] - x_offset
+        mix_img_box[:, 2][mix_img_box[:, 2]>img_orginal_w] = img_orginal_w
+        mix_img_box[:, 3][mix_img_box[:, 3]>img_orginal_h] = img_orginal_h
+
+        
+        img_orginal = 0.5 * img_orginal + 0.5 * padded_cropped_img.astype(np.float32)
+        label = np.concatenate((mix_img_box, label), 0)
+        return img_orginal, label
 
     def get_random_data(self, annotation_line, input_shape, jitter=.3, hue=.1, sat=0.7, val=0.4, random=True):
         line    = annotation_line.split()
@@ -70,34 +160,8 @@ class YoloDataset(Dataset):
         box     = np.array([np.array(list(map(int,box.split(',')))) for box in line[1:]])
 
         if not random:
-            scale = min(w/iw, h/ih)
-            nw = int(iw*scale)
-            nh = int(ih*scale)
-            dx = (w-nw)//2
-            dy = (h-nh)//2
-
-            #---------------------------------#
-            #   将图像多余的部分加上灰条
-            #---------------------------------#
-            image       = image.resize((nw,nh), Image.BICUBIC)
-            new_image   = Image.new('RGB', (w,h), (128,128,128))
-            new_image.paste(image, (dx, dy))
-            image_data  = np.array(new_image, np.float32)
-
-            #---------------------------------#
-            #   对真实框进行调整
-            #---------------------------------#
-            if len(box)>0:
-                np.random.shuffle(box)
-                box[:, [0,2]] = box[:, [0,2]]*nw/iw + dx
-                box[:, [1,3]] = box[:, [1,3]]*nh/ih + dy
-                box[:, 0:2][box[:, 0:2]<0] = 0
-                box[:, 2][box[:, 2]>w] = w
-                box[:, 3][box[:, 3]>h] = h
-                box_w = box[:, 2] - box[:, 0]
-                box_h = box[:, 3] - box[:, 1]
-                box = box[np.logical_and(box_w>1, box_h>1)] # discard invalid box
-
+            image_data, box = self.letter_box(image, box, self.input_shape)
+            image_data  = np.array(image_data, np.float32)
             return image_data, box
                 
         #------------------------------------------#
@@ -341,6 +405,10 @@ class YoloDataset(Dataset):
         #   对框进行进一步的处理
         #---------------------------------#
         new_boxes = self.merge_bboxes(box_datas, cutx, cuty)
+        
+        mix = self.rand() < self.mix_ratio
+        if mix:
+            new_image, new_boxes = self.mix_up(new_image, new_boxes)
 
         return new_image, new_boxes
 
