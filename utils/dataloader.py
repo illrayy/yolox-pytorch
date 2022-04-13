@@ -9,7 +9,7 @@ from utils.utils import cvtColor, preprocess_input
 
 
 class YoloDataset(Dataset):
-    def __init__(self, annotation_lines, input_shape, num_classes, epoch_length, mosaic, train, mosaic_ep_ratio = 0.7, mosaic_ratio = 0.5):
+    def __init__(self, annotation_lines, input_shape, num_classes, epoch_length, mosaic, train, mosaic_ep_ratio = 0.7, mosaic_ratio = 0.5, mix_ratio = 0):
         super(YoloDataset, self).__init__()
         self.annotation_lines   = annotation_lines
         self.input_shape        = input_shape
@@ -23,7 +23,7 @@ class YoloDataset(Dataset):
         self.epoch_now          = -1
         self.length             = len(self.annotation_lines)
         
-        self.mix_ratio          = 0.5
+        self.mix_ratio          = mix_ratio
 
     def __len__(self):
         return self.length
