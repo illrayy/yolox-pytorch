@@ -88,22 +88,27 @@ class YoloDataset(Dataset):
         return new_img, box
     
     def mix_up(self, img_orginal, label):
+        #img_orginal: np.array
+        #label:boxes
+        
         #读取用于混合的图片
         mix_img_infor = sample(self.annotation_lines, 1)[0]
         mix_img = Image.open(mix_img_infor.split()[0])
 
         mix_img_w, mix_img_h = mix_img.size
         img_orginal_h, img_orginal_w = self.input_shape
-        #用于混合的图片的标注信息
+        #读取用于混合的图片的标注信息
         line = mix_img_infor.split()
         mix_img_box = np.array([np.array(list(map(int,box.split(',')))) for box in line[1:]])
 
-        random_resize_scale = self.rand(0.75, 1.5)
-        flip = self.rand()<0.5
-
+        #将用于混合的图片调整到输入网络的大小
         if mix_img_w != img_orginal_w or mix_img_h != img_orginal_h:
             mix_img, mix_img_box = self.letter_box(mix_img, mix_img_box, self.input_shape)
-
+            
+        #随机对用于混合的图片缩放和翻转
+        random_resize_scale = self.rand(0.75, 1.5)
+        flip = self.rand()<0.5
+        
         mix_img_w = int(mix_img_w*random_resize_scale)
         mix_img_h = int(mix_img_h*random_resize_scale)
         
@@ -114,7 +119,8 @@ class YoloDataset(Dataset):
         if flip:
             mix_img = mix_img.transpose(Image.FLIP_TOP_BOTTOM)
             mix_img_box[:, [1,3]] = mix_img.size[1] - mix_img_box[:, [3,1]]
-
+            
+        #将用于混合的图片放置
         padded_img = np.zeros(
             (max(mix_img_h, img_orginal_h), max(mix_img_w, img_orginal_w), 3), dtype=np.uint8
         )
@@ -132,12 +138,14 @@ class YoloDataset(Dataset):
         padded_cropped_img = padded_img[
             y_offset: y_offset + img_orginal_h, x_offset: x_offset + img_orginal_w
         ]
+        
+        #调整boxes
         mix_img_box[:, [1,3]] = mix_img_box[:, [1,3]] - y_offset
         mix_img_box[:, [0,2]] = mix_img_box[:, [0,2]] - x_offset
         mix_img_box[:, 2][mix_img_box[:, 2]>img_orginal_w] = img_orginal_w
         mix_img_box[:, 3][mix_img_box[:, 3]>img_orginal_h] = img_orginal_h
 
-        
+        #混合两张图片
         img_orginal = 0.5 * img_orginal + 0.5 * padded_cropped_img.astype(np.float32)
         label = np.concatenate((mix_img_box, label), 0)
         return img_orginal, label
